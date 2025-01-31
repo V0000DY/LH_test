@@ -76,82 +76,83 @@ function getQueue(maxThreads = 0) {
 
 const mockAsyncQueue = getQueue(threads);
 
+const TASK_ORDER = ['init', 'prepare', 'work', 'finalize', 'cleanup'];
+
+class Queue <T>{
+  private stack1: Array<T>;
+  private stack2: Array<T>;
+
+  constructor() {
+    this.stack1 = [];
+    this.stack2 = [];
+  }
+
+  enqueue(value: T) {
+    while (this.stack2.length > 0) {
+      this.stack1.push(this.stack2.pop()!);
+    }
+    this.stack1.push(value);
+  }
+
+  dequeue() {
+    while (this.stack1.length > 0) {
+      this.stack2.push(this.stack1.pop()!);
+    }
+    return this.stack2.pop();
+  }
+
+  peek() {
+    if (this.stack1.length > 0) {
+      return true;
+    }
+
+    if (this.stack2.length > 0) {
+      return true;
+    }
+
+    return false;
+  }
+}
+
+class ThreadsController {
+  private max: number;
+  private current: number;
+  private queue: Queue<(() => void)>;
+
+  constructor(max: number) {
+    this.max = max;
+    this.current = 0;
+    this.queue = new Queue();
+  }
+
+  acquire(): Promise<void> {
+    // console.log(`Состояние семафора: current = ${this.current}, max = ${this.max}`);
+    return new Promise((resolve) => {
+      if (this.current < this.max) {
+        this.current += 1;
+        resolve();
+      } else {
+        this.queue.enqueue(resolve);
+      }
+    });
+  }
+
+  release(): void {
+    if (this.queue.peek()) {
+      const next = this.queue.dequeue();
+      if (next) { next() }
+    } else {
+      this.current -= 1;
+    }
+  }
+}
+
 export default async function mockRun(executor: IExecutor, queue: AsyncIterable<ITask>, maxThreads = 0) {
   maxThreads = Math.max(0, maxThreads);
   /**
    * Код надо писать сюда
    * Тут что-то вызываем в правильном порядке executor.executeTask для тасков из очереди queue
    */
-  const TASK_ORDER = ['init', 'prepare', 'work', 'finalize', 'cleanup'];
-
-  class Queue <T>{
-    private stack1: Array<T>;
-    private stack2: Array<T>;
-
-    constructor() {
-      this.stack1 = [];
-      this.stack2 = [];
-    }
-
-    enqueue(value: T) {
-      while (this.stack2.length > 0) {
-        this.stack1.push(this.stack2.pop()!);
-      }
-      this.stack1.push(value);
-    }
-
-    dequeue() {
-      while (this.stack1.length > 0) {
-        this.stack2.push(this.stack1.pop()!);
-      }
-      return this.stack2.pop();
-    }
-
-    peek() {
-      if (this.stack1.length > 0) {
-        return true;
-      }
-
-      if (this.stack2.length > 0) {
-        return true;
-      }
-
-      return false;
-    }
-  }
-
-  class ThreadsController {
-    private max: number;
-    private current: number;
-    private queue: Queue<(() => void)>;
-
-    constructor(max: number) {
-      this.max = max;
-      this.current = 0;
-      this.queue = new Queue();
-    }
-
-    acquire(): Promise<void> {
-      // console.log(`Состояние семафора: current = ${this.current}, max = ${this.max}`);
-      return new Promise((resolve) => {
-        if (this.current < this.max) {
-          this.current += 1;
-          resolve();
-        } else {
-          this.queue.enqueue(resolve);
-        }
-      });
-    }
-
-    release(): void {
-      if (this.queue.peek()) {
-        const next = this.queue.dequeue();
-        if (next) { next() }
-      } else {
-        this.current -= 1;
-      }
-    }
-  }
   
   const activeTasks = new Map<number, Promise<void>>();
   const pendingTasks = new Map<number, Queue<ITask>>();
@@ -175,7 +176,7 @@ export default async function mockRun(executor: IExecutor, queue: AsyncIterable<
   function addToPendingTasks(task: ITask): void {
     const { targetId } = task;
     if (!pendingTasks.has(targetId)) {
-      pendingTasks.set(targetId, new Queue);
+      pendingTasks.set(targetId, new Queue());
     }
     pendingTasks.get(targetId)!.enqueue(task);
     if (controller) {
@@ -184,50 +185,57 @@ export default async function mockRun(executor: IExecutor, queue: AsyncIterable<
   }
 
   async function processTask(task: ITask) {
-    const { targetId, action } = task;
-
-    console.log(`Запущена задача id = ${targetId}, тип = ${action} активных потоков = ${[...activeTasks].length}`);
-    if (controller) {
-      // console.log(`Задача id = ${targetId}, тип = ${action} встала перед семафором`);
-      await controller.acquire();
-    }
-    // console.log(`Задача прошла семафор id = ${targetId}, тип = ${action} активных потоков = ${[...activeTasks].length}`);
-
+    
     try {
-      if (!canExecuteTask(task)) {
-        // console.log(`Задача id = ${targetId} с типом = ${action} не может быть выполнена, предыдущие задачи не выполнены! Закинули задачу в массив pendingTasks = ${pendingTasks.get(targetId)}`);
-        addToPendingTasks(task);
-        return;
-      }
-
-      if (activeTasks.has(targetId)) {
-        // console.log(`Задача с id = ${targetId} сейчас на выполнении в activeTasks, тип задачи = ${action} ушедшей в очередь на выполнение`);
-        addToPendingTasks(task);
-        return;
-      }
-
-      const taskPromise = executor.executeTask(task).finally(() => {
-        activeTasks.delete(targetId);
-        console.log(`Задача id = ${targetId} выполнена, тип задачи = ${action} активных потоков = ${[...activeTasks].length}`);
+      const taskQueue: Queue<ITask>  = new Queue();
+      taskQueue.enqueue(task);
+      
+      while (taskQueue.peek()) {
+        const currentTask = taskQueue.dequeue();
+        const { targetId, action } = currentTask!;
+    
+        // console.log(`Запущена задача id = ${targetId}, тип = ${action} активных потоков = ${[...activeTasks].length}`);
         if (controller) {
-          controller.release();
+          console.log(`Задача id = ${targetId}, тип = ${action} встала перед семафором`);
+          await controller.acquire();
         }
-        if (!completedTasks.has(targetId)) {
-          completedTasks.set(targetId, []);
-        }
-        completedTasks.get(targetId)!.push(action);
+        // console.log(`Задача прошла семафор id = ${targetId}, тип = ${action} активных потоков = ${[...activeTasks].length}`);
 
-        const nextTasks = pendingTasks.get(targetId);
-        if (nextTasks && nextTasks.peek()) {
-          console.log(`Есть невыполненные задачи в очереди на выполнение с id = ${targetId}`);
-          const nextTask = nextTasks.dequeue()!;
-          console.log(`Удаляем задачу ${JSON.stringify(nextTask, null, 2)} из pendingTasks`);
-          processTask(nextTask);
+        if (!canExecuteTask(currentTask!)) {
+          // console.log(`Задача id = ${targetId} с типом = ${action} не может быть выполнена, предыдущие задачи не выполнены! Закинули задачу в массив pendingTasks = ${pendingTasks.get(targetId)}`);
+          addToPendingTasks(currentTask!);
+          continue;
         }
-      });
-
-      activeTasks.set(targetId, taskPromise);
-      await taskPromise;
+  
+        if (activeTasks.has(targetId)) {
+          // console.log(`Задача с id = ${targetId} сейчас на выполнении в activeTasks, тип задачи = ${action} ушедшей в очередь на выполнение`);
+          addToPendingTasks(currentTask!);
+          continue;
+        }
+  
+        const taskPromise = executor.executeTask(currentTask!).finally(() => {
+          activeTasks.delete(targetId);
+          console.log(`Задача id = ${targetId} выполнена, тип задачи = ${action} активных потоков = ${[...activeTasks].length}`);
+          if (controller) {
+            controller.release();
+          }
+          if (!completedTasks.has(targetId)) {
+            completedTasks.set(targetId, []);
+          }
+          completedTasks.get(targetId)!.push(action);
+  
+          const nextTasks = pendingTasks.get(targetId);
+          if (nextTasks && nextTasks.peek()) {
+            // console.log(`Есть невыполненные задачи в очереди на выполнение с id = ${targetId}`);
+            const nextTask = nextTasks.dequeue()!;
+            // console.log(`Удаляем задачу ${JSON.stringify(nextTask, null, 2)} из pendingTasks`);
+            taskQueue.enqueue(nextTask);
+          }
+        });
+  
+        activeTasks.set(targetId, taskPromise);
+        await taskPromise;
+      }
     } catch (error) {
       console.error(`Error executing task: ${error}`);
     }
@@ -239,9 +247,11 @@ export default async function mockRun(executor: IExecutor, queue: AsyncIterable<
     taskPromises.push(processTask(task));
   }
 
-  return Promise.all(taskPromises);
+  await Promise.all(taskPromises);
 
-  // return { completedTasks };
+  console.log(completedTasks.get(11));
+
+  return { completedTasks };
   // const result: Record<any, string[]> = {};
 
   // for (const [key, value] of Object.entries(completedTasks)) {

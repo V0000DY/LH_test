@@ -108,42 +108,48 @@ export default async function run(executor: IExecutor, queue: AsyncIterable<ITas
   }
 
   async function processTask(task: ITask) {
-    const { targetId, action } = task;
-
-    if (controller) {
-      await controller.acquire();
-    }
-
     try {
-      if (!canExecuteTask(task)) {
-        addToPendingTasks(task);
-        return;
-      }
-
-      if (activeTasks.has(targetId)) {
-        addToPendingTasks(task);
-        return;
-      }
-
-      const taskPromise = executor.executeTask(task).finally(() => {
-        activeTasks.delete(targetId);
+      const taskQueue: Queue<ITask>  = new Queue();
+      taskQueue.enqueue(task);
+      
+      while (taskQueue.peek()) {
+        const currentTask = taskQueue.dequeue();
+        const { targetId, action } = currentTask!;
+    
         if (controller) {
-          controller.release();
+          await controller.acquire();
         }
-        if (!completedTasks.has(targetId)) {
-          completedTasks.set(targetId, []);
-        }
-        completedTasks.get(targetId)!.push(action);
 
-        const nextTasks = pendingTasks.get(targetId);
-        if (nextTasks && nextTasks.peek()) {
-          const nextTask = nextTasks.dequeue()!;
-          processTask(nextTask);
+        if (!canExecuteTask(currentTask!)) {
+          addToPendingTasks(currentTask!);
+          continue;
         }
-      });
-
-      activeTasks.set(targetId, taskPromise);
-      await taskPromise;
+  
+        if (activeTasks.has(targetId)) {
+          addToPendingTasks(currentTask!);
+          continue;
+        }
+  
+        const taskPromise = executor.executeTask(currentTask!).finally(() => {
+          activeTasks.delete(targetId);
+          if (controller) {
+            controller.release();
+          }
+          if (!completedTasks.has(targetId)) {
+            completedTasks.set(targetId, []);
+          }
+          completedTasks.get(targetId)!.push(action);
+  
+          const nextTasks = pendingTasks.get(targetId);
+          if (nextTasks && nextTasks.peek()) {
+            const nextTask = nextTasks.dequeue()!;
+            taskQueue.enqueue(nextTask);
+          }
+        });
+  
+        activeTasks.set(targetId, taskPromise);
+        await taskPromise;
+      }
     } catch (error) {
       console.error(`Error executing task: ${error}`);
     }
