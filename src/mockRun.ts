@@ -84,14 +84,51 @@ export default async function mockRun(executor: IExecutor, queue: AsyncIterable<
    */
   const TASK_ORDER = ['init', 'prepare', 'work', 'finalize', 'cleanup'];
 
+  class Queue <T>{
+    private stack1: Array<T>;
+    private stack2: Array<T>;
+
+    constructor() {
+      this.stack1 = [];
+      this.stack2 = [];
+    }
+
+    enqueue(value: T) {
+      while (this.stack2.length > 0) {
+        this.stack1.push(this.stack2.pop()!);
+      }
+      this.stack1.push(value);
+    }
+
+    dequeue() {
+      while (this.stack1.length > 0) {
+        this.stack2.push(this.stack1.pop()!);
+      }
+      return this.stack2.pop();
+    }
+
+    peek() {
+      if (this.stack1.length > 0) {
+        return true;
+      }
+
+      if (this.stack2.length > 0) {
+        return true;
+      }
+
+      return false;
+    }
+  }
+
   class ThreadsController {
     private max: number;
     private current: number;
-    private queue: (() => void)[] = [];
+    private queue: Queue<(() => void)>;
 
     constructor(max: number) {
       this.max = max;
       this.current = 0;
+      this.queue = new Queue();
     }
 
     acquire(): Promise<void> {
@@ -101,14 +138,14 @@ export default async function mockRun(executor: IExecutor, queue: AsyncIterable<
           this.current += 1;
           resolve();
         } else {
-          this.queue.push(resolve);
+          this.queue.enqueue(resolve);
         }
       });
     }
 
     release(): void {
-      if (this.queue.length > 0) {
-        const next = this.queue.shift();
+      if (this.queue.peek()) {
+        const next = this.queue.dequeue();
         if (next) { next() }
       } else {
         this.current -= 1;
@@ -117,7 +154,7 @@ export default async function mockRun(executor: IExecutor, queue: AsyncIterable<
   }
   
   const activeTasks = new Map<number, Promise<void>>();
-  const pendingTasks = new Map<number, ITask[]>();
+  const pendingTasks = new Map<number, Queue<ITask>>();
   const completedTasks = new Map<number, string[]>();
   const controller = maxThreads > 0 ? new ThreadsController(maxThreads) : null;
 
@@ -138,9 +175,9 @@ export default async function mockRun(executor: IExecutor, queue: AsyncIterable<
   function addToPendingTasks(task: ITask): void {
     const { targetId } = task;
     if (!pendingTasks.has(targetId)) {
-      pendingTasks.set(targetId, []);
+      pendingTasks.set(targetId, new Queue);
     }
-    pendingTasks.get(targetId)!.push(task);
+    pendingTasks.get(targetId)!.enqueue(task);
     if (controller) {
       controller.release();
     }
@@ -181,9 +218,9 @@ export default async function mockRun(executor: IExecutor, queue: AsyncIterable<
         completedTasks.get(targetId)!.push(action);
 
         const nextTasks = pendingTasks.get(targetId);
-        if (nextTasks && nextTasks.length > 0) {
+        if (nextTasks && nextTasks.peek()) {
           console.log(`Есть невыполненные задачи в очереди на выполнение с id = ${targetId}`);
-          const nextTask = nextTasks.shift()!;
+          const nextTask = nextTasks.dequeue()!;
           console.log(`Удаляем задачу ${JSON.stringify(nextTask, null, 2)} из pendingTasks`);
           processTask(nextTask);
         }
@@ -202,9 +239,9 @@ export default async function mockRun(executor: IExecutor, queue: AsyncIterable<
     taskPromises.push(processTask(task));
   }
 
-  await Promise.all(taskPromises);
+  return Promise.all(taskPromises);
 
-  return { completedTasks };
+  // return { completedTasks };
   // const result: Record<any, string[]> = {};
 
   // for (const [key, value] of Object.entries(completedTasks)) {
